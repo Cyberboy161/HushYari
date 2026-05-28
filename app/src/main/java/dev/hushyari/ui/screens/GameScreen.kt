@@ -69,7 +69,10 @@ fun GameScreen(
     var showSkillsPanel by remember { mutableStateOf(false) }
 
     LaunchedEffect(gamePackage) {
-        viewModel.initialize(gamePackage, taskDescription)
+        viewModel.initialize(gamePackage)
+        if (gamePackage.isNotBlank() && !uiState.agentRunning) {
+            viewModel.startAgent("Play $gamePackage")
+        }
     }
 
     Scaffold(
