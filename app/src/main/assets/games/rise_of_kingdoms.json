@@ -1,0 +1,22 @@
+{
+  "gameName": "Rise of Kingdoms",
+  "packageName": "com.lilithgame.roc.gp",
+  "gameType": "4x_strategy",
+  "screens": [
+    {"name": "city_view", "identifiers": ["build_button", "train_button", "research_button"]},
+    {"name": "world_map", "identifiers": ["zoom_button", "resource_nodes", "barbarians"]},
+    {"name": "battle_report", "identifiers": ["victory", "defeat", "resources_lost"]},
+    {"name": "alliance", "identifiers": ["alliance_help", "alliance_war"]},
+    {"name": "event", "identifiers": ["event_timer", "event_rewards"]}
+  ],
+  "resources": ["food", "wood", "stone", "gold", "gems", "action_points"],
+  "popups": [
+    {"type": "offer", "dismissTargets": ["close_button"]},
+    {"type": "event", "dismissTargets": [{"textContains": "Close"}]},
+    {"type": "connection", "dismissTargets": ["confirm_button"]}
+  ],
+  "safetyRules": {
+    "premiumCurrency": "gems",
+    "spendingWarningThreshold": 50
+  }
+}

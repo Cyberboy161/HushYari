@@ -1,0 +1,15 @@
+{
+  "gameName": "_Template",
+  "packageName": "com.example.game",
+  "gameType": "generic",
+  "screens": [
+    {"name": "main_menu", "identifiers": []},
+    {"name": "gameplay", "identifiers": []}
+  ],
+  "resources": [],
+  "popups": [],
+  "safetyRules": {
+    "premiumCurrency": "",
+    "spendingWarningThreshold": 0
+  }
+}

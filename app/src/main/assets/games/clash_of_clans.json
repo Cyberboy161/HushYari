@@ -1,0 +1,22 @@
+{
+  "gameName": "Clash of Clans",
+  "packageName": "com.supercell.clashofclans",
+  "gameType": "strategy",
+  "screens": [
+    {"name": "main_village", "identifiers": ["home_village_tab", "shop_button"]},
+    {"name": "battle_screen", "identifiers": ["attack_button", "troop_selector"]},
+    {"name": "shop", "identifiers": ["gems_balance", "buy_gems"]},
+    {"name": "clan", "identifiers": ["clan_chat", "clan_war"]},
+    {"name": "builder_base", "identifiers": ["builder_base_tab"]}
+  ],
+  "resources": ["gold", "elixir", "dark_elixir", "gems", "builder_gold", "builder_elixir"],
+  "popups": [
+    {"type": "offer", "dismissTargets": ["close_button", {"contentDescContains": "Close"}]},
+    {"type": "update", "dismissTargets": ["later_button", {"textContains": "Later"}]},
+    {"type": "connection", "dismissTargets": ["retry_button", {"textContains": "Retry"}]}
+  ],
+  "safetyRules": {
+    "premiumCurrency": "gems",
+    "spendingWarningThreshold": 10
+  }
+}

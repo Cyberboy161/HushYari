@@ -1,0 +1,20 @@
+{
+  "gameName": "Clash Royale",
+  "packageName": "com.supercell.clashroyale",
+  "gameType": "realtime_strategy",
+  "screens": [
+    {"name": "main_menu", "identifiers": ["battle_button", "card_collection"]},
+    {"name": "battle", "identifiers": ["elixir_bar", "card_hand"]},
+    {"name": "battle_result", "identifiers": ["victory_text", "defeat_text", "crown_count"]},
+    {"name": "shop", "identifiers": ["gems_balance", "offer_items"]}
+  ],
+  "resources": ["gold", "gems", "cards", "trophies"],
+  "popups": [
+    {"type": "offer", "dismissTargets": [{"contentDescContains": "Close"}]},
+    {"type": "chest", "dismissTargets": [{"textContains": "Open"}]}
+  ],
+  "safetyRules": {
+    "premiumCurrency": "gems",
+    "spendingWarningThreshold": 5
+  }
+}

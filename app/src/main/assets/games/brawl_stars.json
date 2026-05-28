@@ -1,0 +1,18 @@
+{
+  "gameName": "Brawl Stars",
+  "packageName": "com.supercell.brawlstars",
+  "gameType": "action",
+  "screens": [
+    {"name": "main_menu", "identifiers": ["brawl_button", "brawlers_button"]},
+    {"name": "battle", "identifiers": ["joystick_area", "attack_button", "super_button"]},
+    {"name": "battle_end", "identifiers": ["trophy_change", "continue_button"]}
+  ],
+  "resources": ["coins", "gems", "power_points", "trophies"],
+  "popups": [
+    {"type": "offer", "dismissTargets": [{"contentDescContains": "Close"}]}
+  ],
+  "safetyRules": {
+    "premiumCurrency": "gems",
+    "spendingWarningThreshold": 10
+  }
+}
