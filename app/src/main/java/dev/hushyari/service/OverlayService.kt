@@ -253,6 +253,8 @@ class OverlayService : Service() {
             inputType = InputType.TYPE_CLASS_TEXT
             imeOptions = EditorInfo.IME_ACTION_SEND
             maxLines = 1
+            isFocusable = true
+            isFocusableInTouchMode = true
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -266,6 +268,16 @@ class OverlayService : Service() {
                     }
                     true
                 } else false
+            }
+            setOnFocusChangeListener { _, hasFocus ->
+                panelParams?.let { params ->
+                    params.flags = if (hasFocus) {
+                        params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+                    } else {
+                        params.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                    }
+                    windowManager?.updateViewLayout(panelView, params)
+                }
             }
         }
         container.addView(commandInput)
