@@ -1,304 +1,528 @@
 package dev.hushyari.service
 
+import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
 import android.provider.Settings
+import android.text.InputType
+import android.text.method.ScrollingMovementMethod
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
+import android.widget.Button
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
-import android.widget.Button
-import android.graphics.Color
-import android.graphics.drawable.GradientDrawable
 import dev.hushyari.R
-import timber.log.Timber
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 
-/**
- * Floating control pill overlay that shows game name, agent status, step count,
- * and provides stop/pause buttons for quick agent control.
- *
- * Draggable by the user around the screen. Reports tap events back to the
- * agent via a callback interface. Requires SYSTEM_ALERT_WINDOW permission.
- *
- * **Mechanics:**
- * - PokeClaw: Floating overlay pattern — gives the user always-visible
- *   agent status and control without switching to the app.
- */
 class OverlayService : Service() {
 
     private var windowManager: WindowManager? = null
-    private var overlayView: View? = null
-    private var overlayParams: WindowManager.LayoutParams? = null
+    private var panelView: View? = null
+    private var miniView: View? = null
+    private var panelParams: WindowManager.LayoutParams? = null
+    private var miniParams: WindowManager.LayoutParams? = null
+    private var isMinimized = false
 
-    private var gameName: String = "HushYari"
-    private var agentStatus: String = "Idle"
-    private var stepCount: Int = 0
-    private var isDragging: Boolean = false
-    private var initialX: Int = 0
-    private var initialY: Int = 0
-    private var initialTouchX: Float = 0f
-    private var initialTouchY: Float = 0f
+    private var isDragging = false
+    private var dragStartX = 0
+    private var dragStartY = 0
+    private var touchStartX = 0f
+    private var touchStartY = 0f
 
-    private val handler = Handler(Looper.getMainLooper())
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var stateJob: Job? = null
+    private var commandReceiver: BroadcastReceiver? = null
+
+    // View references
+    private var titleText: TextView? = null
+    private var screenText: TextView? = null
+    private var screenDescText: TextView? = null
+    private var actionText: TextView? = null
+    private var planText: TextView? = null
+    private var skillText: TextView? = null
+    private var worldText: TextView? = null
+    private var thinkingText: TextView? = null
+    private var statusText: TextView? = null
+    private var stepText: TextView? = null
+    private var commandInput: EditText? = null
 
     companion object {
-        /** Broadcast action to toggle pause/resume from overlay. */
+        const val ACTION_COMMAND = "dev.hushyari.action.OVERLAY_COMMAND"
         const val ACTION_TOGGLE_PAUSE = "dev.hushyari.action.OVERLAY_TOGGLE_PAUSE"
-        /** Broadcast action to stop agent from overlay. */
         const val ACTION_STOP_AGENT = "dev.hushyari.action.OVERLAY_STOP_AGENT"
-        /** Broadcast action to open the main app from overlay. */
-        const val ACTION_OPEN_APP = "dev.hushyari.action.OVERLAY_OPEN_APP"
+        const val ACTION_TOGGLE_MINIMIZE = "dev.hushyari.action.OVERLAY_TOGGLE_MINIMIZE"
+        const val ACTION_STATE_UPDATE = "dev.hushyari.action.OVERLAY_STATE_UPDATE"
+        const val EXTRA_COMMAND = "command"
     }
 
     override fun onCreate() {
         super.onCreate()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-        Timber.d("OverlayService created")
+
+        commandReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    ACTION_STATE_UPDATE -> {
+                        OverlayState.update {
+                            copy(
+                                gameName = intent.getStringExtra("game_name") ?: gameName,
+                                agentStatus = intent.getStringExtra("status") ?: agentStatus,
+                                stepCount = intent.getIntExtra("step_count", stepCount),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        registerReceiver(commandReceiver, IntentFilter(ACTION_STATE_UPDATE),
+            RECEIVER_NOT_EXPORTED)
+
+        observeState()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-            Timber.w("Overlay permission not granted, stopping")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+            !Settings.canDrawOverlays(this)
+        ) {
             stopSelf()
             return START_NOT_STICKY
         }
 
-        if (overlayView != null) {
-            // Already showing, update state from intent
-            intent?.let {
-                gameName = it.getStringExtra("game_name") ?: gameName
-                agentStatus = it.getStringExtra("status") ?: agentStatus
-                stepCount = it.getIntExtra("step_count", stepCount)
-            }
-            updateOverlayContent()
-            return START_STICKY
-        }
+        if (panelView != null) return START_STICKY
 
-        intent?.let {
-            gameName = it.getStringExtra("game_name") ?: gameName
-            agentStatus = it.getStringExtra("status") ?: agentStatus
-            stepCount = it.getIntExtra("step_count", stepCount)
-        }
-
-        createOverlay()
-        Timber.d("OverlayService started: $gameName [$agentStatus]")
+        createPanel()
+        createMini()
+        showPanel()
         return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        removeOverlay()
-        Timber.d("OverlayService destroyed")
+        stateJob?.cancel()
+        scope.cancel()
+        commandReceiver?.let { unregisterReceiver(it) }
+        removeViews()
         super.onDestroy()
     }
 
-    /**
-     * Update the game name displayed in the overlay.
-     */
-    fun setGameName(name: String) {
-        gameName = name
-        updateOverlayContent()
+    private fun observeState() {
+        stateJob = scope.launch {
+            OverlayState.state.collectLatest { state ->
+                titleText?.text = state.gameName.ifEmpty { "HushYari" }
+                screenText?.text = "Screen: ${state.currentScreen}"
+                screenDescText?.text = state.screenDescription
+                actionText?.text = "Last: ${state.lastAction}"
+                planText?.text = state.currentPlan
+                skillText?.text = state.activeSkill
+                worldText?.text = state.worldSummary
+                statusText?.text = state.agentStatus
+                stepText?.text = "Step ${state.stepCount}"
+                thinkingText?.visibility = if (state.llmThinking) View.VISIBLE else View.GONE
+
+                val statusColor = when {
+                    state.error != null -> Color.parseColor("#FF6666")
+                    state.popupDetected -> Color.parseColor("#FFCC00")
+                    state.agentStatus == "Running" -> Color.parseColor("#66FF66")
+                    else -> Color.parseColor("#CCCCCC")
+                }
+                statusText?.setTextColor(statusColor)
+            }
+        }
     }
 
-    /**
-     * Update the agent status text displayed in the overlay.
-     */
-    fun setAgentStatus(status: String) {
-        agentStatus = status
-        updateOverlayContent()
-    }
+    // ── Layout types ───────────────────────────────
 
-    /**
-     * Update the step count displayed in the overlay.
-     */
-    fun setStepCount(count: Int) {
-        stepCount = count
-        updateOverlayContent()
-    }
+    private val overlayType: Int
+        get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
-    // ── Overlay creation ────────────────────────────────────────────────
+    private val overlayFlags: Int
+        get() = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
 
-    private fun createOverlay() {
+    // ── Panel ──────────────────────────────────────
+
+    private fun createPanel() {
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setPadding(dp(12), dp(10), dp(12), dp(10))
 
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#E8222222"))
-                cornerRadius = dp(12).toFloat()
-                setStroke(dp(1), Color.parseColor("#66FFFFFF"))
+                setColor(Color.parseColor("#DD1A1A2E"))
+                cornerRadius = dp(14).toFloat()
+                setStroke(dp(1), Color.parseColor("#4433AAFF"))
             }
         }
 
-        val titleText = TextView(this).apply {
-            text = gameName
+        // Header: game name + minimize button
+        val headerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        titleText = TextView(this).apply {
+            text = "HushYari"
             textSize = 13f
             setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(4))
-            alpha = 0.9f
+            gravity = Gravity.START
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
-        container.addView(titleText)
 
-        val statusText = TextView(this).apply {
-            text = agentStatus
-            textSize = 11f
-            setTextColor(Color.parseColor("#CCCCCC"))
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(4))
-            alpha = 0.8f
+        val minBtn = Button(this).apply {
+            text = "—"
+            textSize = 12f
+            setBackgroundColor(Color.TRANSPARENT)
+            setTextColor(Color.parseColor("#88AACC"))
+            setPadding(dp(6), 0, dp(6), 0)
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(28))
+            setOnClickListener { minimize() }
         }
-        container.addView(statusText)
+        headerRow.addView(titleText)
+        headerRow.addView(minBtn)
+        container.addView(headerRow)
+        container.addView(divider())
 
-        val stepText = TextView(this).apply {
-            text = "Step: $stepCount"
+        // Screen info
+        screenText = infoRow(container, "Screen: —")
+        screenDescText = descRow(container, "No data yet")
+        actionText = infoRow(container, "Last action: —")
+        planText = descRow(container, "Plan: —")
+        skillText = infoRow(container, "Skill: —")
+        worldText = descRow(container, "World: —")
+
+        // Thinking indicator
+        thinkingText = TextView(this).apply {
+            text = "🧠 Thinking..."
             textSize = 10f
-            setTextColor(Color.parseColor("#999999"))
-            gravity = Gravity.CENTER
-            alpha = 0.7f
-        }
-        container.addView(stepText)
-
-        val buttonRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(6), 0, 0)
-        }
-
-        val pauseBtn = Button(this).apply {
-            text = "⏯"
-            textSize = 14f
-            setBackgroundColor(Color.TRANSPARENT)
-            setTextColor(Color.WHITE)
-            setPadding(dp(8), 0, dp(8), 0)
-            isAllCaps = false
-            setOnClickListener {
-                sendBroadcast(Intent(ACTION_TOGGLE_PAUSE))
-            }
-        }
-
-        val stopBtn = Button(this).apply {
-            text = "⏹"
-            textSize = 14f
-            setBackgroundColor(Color.TRANSPARENT)
-            setTextColor(Color.parseColor("#FF6666"))
-            setPadding(dp(8), 0, dp(8), 0)
-            isAllCaps = false
-            setOnClickListener {
-                sendBroadcast(Intent(ACTION_STOP_AGENT))
-            }
-        }
-
-        val appBtn = Button(this).apply {
-            text = "H"
-            textSize = 14f
-            setBackgroundColor(Color.TRANSPARENT)
             setTextColor(Color.parseColor("#66CCFF"))
-            setPadding(dp(8), 0, dp(8), 0)
-            isAllCaps = false
-            setOnClickListener {
-                sendBroadcast(Intent(ACTION_OPEN_APP))
+            visibility = View.GONE
+        }
+        container.addView(thinkingText)
+
+        // Status footer
+        container.addView(divider())
+
+        val footerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        statusText = infoInRow(footerRow, "Status", "Idle")
+        stepText = infoInRow(footerRow, "", "0")
+
+        val pauseBtn = smallBtn("⏯", "#FFFFFF") {
+            sendBroadcast(Intent(ACTION_TOGGLE_PAUSE))
+        }
+        val stopBtn = smallBtn("⏹", "#FF6666") {
+            sendBroadcast(Intent(ACTION_STOP_AGENT))
+        }
+        footerRow.addView(pauseBtn)
+        footerRow.addView(stopBtn)
+        container.addView(footerRow)
+
+        // Command input
+        commandInput = EditText(this).apply {
+            hint = "Tell the agent what to do..."
+            setHintTextColor(Color.parseColor("#6688AA"))
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            setBackgroundColor(Color.parseColor("#331A2A4E"))
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            inputType = InputType.TYPE_CLASS_TEXT
+            imeOptions = EditorInfo.IME_ACTION_SEND
+            maxLines = 1
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(8) }
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_SEND) {
+                    val cmd = text.toString().trim()
+                    if (cmd.isNotEmpty()) {
+                        sendCommand(cmd)
+                        text.clear()
+                    }
+                    true
+                } else false
             }
         }
+        container.addView(commandInput)
 
-        buttonRow.addView(pauseBtn)
-        buttonRow.addView(stopBtn)
-        buttonRow.addView(appBtn)
-        container.addView(buttonRow)
+        // Drag via header only
+        headerRow.setOnTouchListener { _, event -> handleDrag(event) }
 
-        // Store references for updates
-        container.setTag(R.id.overlay_title, titleText)
-        container.setTag(R.id.overlay_status, statusText)
-        container.setTag(R.id.overlay_steps, stepText)
+        panelView = container
 
-        // Drag handling
-        container.setOnTouchListener { view, event ->
-            handleTouch(view, event)
-        }
-
-        overlayView = container
-
-        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        } else {
-            @Suppress("DEPRECATION")
-            WindowManager.LayoutParams.TYPE_PHONE
-        }
-
-        overlayParams = WindowManager.LayoutParams(
+        panelParams = WindowManager.LayoutParams(
+            dp(300),
             WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            layoutType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+            overlayType,
+            overlayFlags,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 16
-            y = 200
+            x = dp(40)
+            y = dp(120)
         }
-
-        windowManager?.addView(overlayView, overlayParams)
     }
 
-    private fun handleTouch(view: View, event: MotionEvent): Boolean {
+    // ── Mini view (when collapsed) ────────────────
+
+    private fun createMini() {
+        miniView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#DD1A1A2E"))
+                cornerRadius = dp(20).toFloat()
+                setStroke(dp(1), Color.parseColor("#4433AAFF"))
+            }
+
+            val label = TextView(this@OverlayService).apply {
+                text = "H"
+                textSize = 14f
+                setTextColor(Color.parseColor("#66CCFF"))
+                gravity = Gravity.CENTER
+            }
+
+            val status = TextView(this@OverlayService).apply {
+                text = "•"
+                textSize = 10f
+                setTextColor(Color.parseColor("#66FF66"))
+                gravity = Gravity.CENTER
+                tag = "mini_status"
+            }
+
+            addView(label)
+            addView(status)
+
+            var touchDownTime = 0L
+            var wasDragged = false
+
+            setOnTouchListener { _, ev ->
+                when (ev.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        touchDownTime = System.currentTimeMillis()
+                        wasDragged = false
+                        handleMiniDrag(ev)
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        if (kotlin.math.abs(ev.rawX - touchStartX) > 5 ||
+                            kotlin.math.abs(ev.rawY - touchStartY) > 5
+                        ) wasDragged = true
+                        handleMiniDrag(ev)
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        handleMiniDrag(ev)
+                        if (!wasDragged && System.currentTimeMillis() - touchDownTime < 300) {
+                            maximize()
+                        }
+                    }
+                }
+                true
+            }
+        }
+
+        miniParams = WindowManager.LayoutParams(
+            dp(48),
+            dp(48),
+            overlayType,
+            overlayFlags,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = dp(40)
+            y = dp(120)
+        }
+    }
+
+    // ── Minimize / Maximize ───────────────────────
+
+    private fun minimize() {
+        if (isMinimized) return
+        removePanelView()
+        miniParams?.let { p ->
+            panelParams?.let { pp ->
+                p.x = pp.x
+                p.y = pp.y
+            }
+            windowManager?.addView(miniView, p)
+        }
+        isMinimized = true
+    }
+
+    private fun maximize() {
+        if (!isMinimized) return
+        miniView?.let { windowManager?.removeView(it) }
+        panelParams?.let { windowManager?.addView(panelView, it) }
+        isMinimized = false
+    }
+
+    private fun removePanelView() {
+        try { panelView?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
+    }
+
+    private fun removeViews() {
+        try {
+            panelView?.let { windowManager?.removeView(it) }
+            miniView?.let { windowManager?.removeView(it) }
+        } catch (_: Exception) {}
+    }
+
+    private fun showPanel() {
+        panelParams?.let { windowManager?.addView(panelView, it) }
+    }
+
+    // ── Drag handling ─────────────────────────────
+
+    private fun handleDrag(event: MotionEvent): Boolean {
         return when (event.action) {
             MotionEvent.ACTION_DOWN -> {
-                initialX = overlayParams?.x ?: 0
-                initialY = overlayParams?.y ?: 0
-                initialTouchX = event.rawX
-                initialTouchY = event.rawY
+                val p = panelParams ?: return false
+                dragStartX = p.x; dragStartY = p.y
+                touchStartX = event.rawX; touchStartY = event.rawY
                 isDragging = false
                 true
             }
             MotionEvent.ACTION_MOVE -> {
-                val deltaX = (event.rawX - initialTouchX).toInt()
-                val deltaY = (event.rawY - initialTouchY).toInt()
-                if (kotlin.math.abs(deltaX) > 10 || kotlin.math.abs(deltaY) > 10) {
-                    isDragging = true
-                }
-                if (isDragging) {
-                    overlayParams?.x = initialX + deltaX
-                    overlayParams?.y = initialY + deltaY
-                    windowManager?.updateViewLayout(overlayView, overlayParams)
+                val dx = (event.rawX - touchStartX).toInt()
+                val dy = (event.rawY - touchStartY).toInt()
+                if (kotlin.math.abs(dx) > 8 || kotlin.math.abs(dy) > 8) isDragging = true
+                if (isDragging && panelParams != null) {
+                    panelParams?.x = dragStartX + dx
+                    panelParams?.y = dragStartY + dy
+                    windowManager?.updateViewLayout(panelView, panelParams)
                 }
                 true
             }
-            MotionEvent.ACTION_UP -> {
-                !isDragging
-            }
+            MotionEvent.ACTION_UP -> !isDragging
             else -> false
         }
     }
 
-    private fun updateOverlayContent() {
-        handler.post {
-            val container = overlayView ?: return@post
-            val titleText = container.getTag(R.id.overlay_title) as? TextView ?: return@post
-            val statusText = container.getTag(R.id.overlay_status) as? TextView ?: return@post
-            val stepText = container.getTag(R.id.overlay_steps) as? TextView ?: return@post
-
-            titleText.text = gameName
-            statusText.text = agentStatus
-            stepText.text = "Step: $stepCount"
+    private fun handleMiniDrag(event: MotionEvent): Boolean {
+        return when (event.action) {
+            MotionEvent.ACTION_DOWN -> {
+                val p = miniParams ?: return false
+                dragStartX = p.x; dragStartY = p.y
+                touchStartX = event.rawX; touchStartY = event.rawY
+                isDragging = false
+                true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val dx = (event.rawX - touchStartX).toInt()
+                val dy = (event.rawY - touchStartY).toInt()
+                if (kotlin.math.abs(dx) > 5 || kotlin.math.abs(dy) > 5) isDragging = true
+                if (isDragging && miniParams != null) {
+                    miniParams?.x = dragStartX + dx
+                    miniParams?.y = dragStartY + dy
+                    windowManager?.updateViewLayout(miniView, miniParams)
+                }
+                true
+            }
+            MotionEvent.ACTION_UP -> !isDragging
+            else -> false
         }
     }
 
-    private fun removeOverlay() {
-        try {
-            overlayView?.let { windowManager?.removeView(it) }
-        } catch (_: Exception) { }
-        overlayView = null
+    // ── Helpers ───────────────────────────────────
+
+    private fun infoRow(parent: LinearLayout, label: String): TextView {
+        val tv = TextView(this).apply {
+            text = label
+            textSize = 11f
+            setTextColor(Color.parseColor("#AABBCC"))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(3) }
+        }
+        parent.addView(tv)
+        return tv
     }
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    private fun descRow(parent: LinearLayout, label: String): TextView {
+        val tv = TextView(this).apply {
+            text = label
+            textSize = 10f
+            setTextColor(Color.parseColor("#778899"))
+            maxLines = 2
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        parent.addView(tv)
+        return tv
+    }
+
+    private fun infoInRow(parent: LinearLayout, label: String, value: String): TextView {
+        val tv = TextView(this).apply {
+            text = if (label.isNotEmpty()) "$label: $value" else value
+            textSize = 11f
+            setTextColor(Color.parseColor("#AABBCC"))
+            layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+            )
+        }
+        parent.addView(tv)
+        return tv
+    }
+
+    private fun smallBtn(text: String, color: String, onClick: () -> Unit): Button {
+        return Button(this).apply {
+            this.text = text
+            textSize = 13f
+            setBackgroundColor(Color.TRANSPARENT)
+            setTextColor(Color.parseColor(color))
+            setPadding(dp(4), 0, dp(4), 0)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, dp(28)
+            )
+            setOnClickListener { onClick() }
+        }
+    }
+
+    private fun divider(): View {
+        return View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(1)
+            ).apply {
+                topMargin = dp(6); bottomMargin = dp(6)
+            }
+            setBackgroundColor(Color.parseColor("#22334455"))
+        }
+    }
+
+    private fun sendCommand(text: String) {
+        val intent = Intent(ACTION_COMMAND).apply {
+            putExtra(EXTRA_COMMAND, text)
+            setPackage(packageName)
+        }
+        sendBroadcast(intent)
+    }
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 }

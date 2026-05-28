@@ -1,7 +1,10 @@
 package dev.hushyari.ui.viewmodel
 
 import android.app.Application
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -16,6 +19,8 @@ import dev.hushyari.data.repository.SessionLog
 import dev.hushyari.data.repository.SessionRepository
 import dev.hushyari.data.repository.SessionStatus
 import dev.hushyari.data.repository.SkillRepository
+import dev.hushyari.service.OverlayService
+import dev.hushyari.service.OverlayState
 import dev.hushyari.skills.SkillEngine
 import dev.hushyari.statemachine.GameConfig
 import dev.hushyari.ui.components.LogEntry
@@ -116,6 +121,25 @@ class GameViewModel @Inject constructor(
 
         addLog(LogLevel.INFO, "Launching game: $gamePkg")
 
+        // Start floating overlay panel
+        val app = getApplication<Application>()
+        val overlayIntent = Intent(app, OverlayService::class.java).apply {
+            putExtra("game_name", state.gameConfig?.gameName ?: gamePkg)
+            putExtra("status", "Starting...")
+        }
+        app.startService(overlayIntent)
+
+        // Listen for commands typed into the overlay
+        val commandReceiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                val cmd = intent?.getStringExtra(OverlayService.EXTRA_COMMAND) ?: return
+                viewModelScope.launch { handleCommand(cmd) }
+            }
+        }
+        app.registerReceiver(commandReceiver,
+            IntentFilter(OverlayService.ACTION_COMMAND),
+            Context.RECEIVER_NOT_EXPORTED)
+
         viewModelScope.launch {
             val context = getApplication<Application>()
 
@@ -200,6 +224,10 @@ class GameViewModel @Inject constructor(
         agentJob?.cancel()
         timerJob?.cancel()
 
+        val ctx = getApplication<Application>()
+        ctx.stopService(Intent(ctx, OverlayService::class.java))
+        OverlayState.reset()
+
         _uiState.update {
             it.copy(
                 agentRunning = false,
@@ -256,6 +284,28 @@ class GameViewModel @Inject constructor(
 
     fun clearError() {
         _uiState.update { it.copy(error = null) }
+    }
+
+    private suspend fun handleCommand(command: String) {
+        addLog(LogLevel.INFO, "Command: $command")
+        OverlayState.setStatus("Processing: $command")
+
+        when {
+            command.equals("stop", ignoreCase = true) -> stopAgent()
+            command.equals("pause", ignoreCase = true) -> pauseAgent()
+            command.equals("resume", ignoreCase = true) -> resumeAgent()
+            command.startsWith("skill ", ignoreCase = true) -> {
+                val skillName = command.removePrefix("skill ").trim()
+                addLog(LogLevel.INFO, "Starting skill: $skillName")
+                // Skills would be dispatched through the agent loop
+            }
+            else -> {
+                // Restart agent with new task
+                stopAgent()
+                delay(500)
+                startAgent(command)
+            }
+        }
     }
 
     private fun loadSkills(gamePackage: String) {

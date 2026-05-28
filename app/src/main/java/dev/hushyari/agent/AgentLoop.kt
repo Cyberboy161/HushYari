@@ -15,6 +15,7 @@ import dev.hushyari.llm.PromptEngine
 import dev.hushyari.llm.ResponseParser
 import dev.hushyari.llm.Role
 import dev.hushyari.perception.PerceptionPipeline
+import dev.hushyari.service.OverlayState
 import dev.hushyari.skills.SkillEngine
 import dev.hushyari.statemachine.GameConfig
 import dev.hushyari.statemachine.GameFSM
@@ -135,6 +136,11 @@ class AgentLoop @Inject constructor(
                 val captureTime = System.currentTimeMillis() - stepStart
                 emit(AgentEvent.ScreenCaptured(screenState, captureTime))
 
+                OverlayState.setScreen(
+                    name = screenState.packageName,
+                    description = "${screenState.elementCount} elements, ${screenState.clickableElements.size} clickable"
+                )
+
                 val worldState = worldStateManager.getState()
 
                 // ── 2. HANDLE POPUPS ───────────────────────────────
@@ -167,6 +173,10 @@ class AgentLoop @Inject constructor(
                 }
                 if (classification != null) {
                     emit(AgentEvent.ScreenClassified(classification.screenName, classification.confidence))
+                    OverlayState.setScreen(
+                        name = classification.screenName,
+                        description = "${screenState.elementCount} elements, confidence ${(classification.confidence * 100).toInt()}%"
+                    )
                     worldStateManager.updateScreen(classification.screenName)
                     gameFsm.onScreenChanged(classification.screenName)
                 }
