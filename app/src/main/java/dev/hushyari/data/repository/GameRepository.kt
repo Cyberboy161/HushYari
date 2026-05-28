@@ -1,13 +1,16 @@
 package dev.hushyari.data.repository
 
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.hushyari.data.local.dao.GameConfigDao
 import dev.hushyari.data.local.entities.GameConfigEntity
 import dev.hushyari.statemachine.GameConfig
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -16,6 +19,34 @@ data class AppInfo(
     val packageName: String,
     val appName: String,
     val isGame: Boolean = false,
+)
+
+private val KNOWN_GAME_PACKAGES = setOf(
+    "com.supercell.clashofclans",
+    "com.supercell.clashroyale",
+    "com.supercell.brawlstars",
+    "com.supercell.boombeach",
+    "com.supercell.hayday",
+    "com.supercell.clashquest",
+    "com.supercell.squad",
+    "com.lilithgame.roc.gp",
+    "com.igg.android.lordsmobile",
+    "com.topwar.android",
+    "com.longtech.lastwars.gp",
+    "com.mobile.legends",
+    "com.miHoYo.GenshinImpact",
+    "com.miHoYo.HoKAI3rd",
+    "com.tencent.ig",
+    "com.pubg.imobile",
+    "com.epicgames.fortnite",
+    "com.roblox.client",
+    "com.mojang.minecraftpe",
+    "com.nianticlabs.pokemongo",
+    "com.netflix.NGP.GameController",
+    "com.ea.game.pvz2_row",
+    "com.king.candycrushsaga",
+    "com.ea.gp.fifamobile",
+    "com.scopely.monopolygo",
 )
 
 @Singleton
@@ -54,23 +85,48 @@ class GameRepository @Inject constructor(
         dao.deleteByPackage(packageName)
     }
 
-    fun getInstalledGames(): List<AppInfo> {
+    suspend fun getInstalledGames(): List<AppInfo> = withContext(Dispatchers.IO) {
         val pm = context.packageManager
-        val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+        val launchIntent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_LAUNCHER)
+        }
+        val launchableActivities = pm.queryIntentActivities(launchIntent, 0)
+        val launchablePackages = launchableActivities.map { it.activityInfo.packageName }.toSet()
 
-        return packages.mapNotNull { app ->
-            if (app.packageName == context.packageName) return@mapNotNull null
+        val gameIntent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_APP_MARKET)
+        }
+        val categoryGamePackages = try {
+            val catIntent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory("android.intent.category.GAME")
+            }
+            pm.queryIntentActivities(catIntent, 0)
+                .map { it.activityInfo.packageName }
+                .toSet()
+        } catch (_: Exception) {
+            emptySet()
+        }
 
-            val isGame = app.flags and android.content.pm.ApplicationInfo.FLAG_IS_GAME != 0 ||
-                    app.packageName.contains("game", ignoreCase = true) ||
-                    app.packageName.contains("play", ignoreCase = true)
+        val rawPackages = pm.getInstalledPackages(0)
+            .filter { it.packageName in launchablePackages }
+            .filter { it.packageName != context.packageName }
+            .distinctBy { it.packageName }
+
+        rawPackages.map { pkg ->
+            val pn = pkg.packageName
+            val appInfo = pkg.applicationInfo ?: return@map null
+            val isGame = pn in categoryGamePackages ||
+                pn in KNOWN_GAME_PACKAGES ||
+                (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_IS_GAME) != 0
 
             AppInfo(
-                packageName = app.packageName,
-                appName = pm.getApplicationLabel(app).toString(),
+                packageName = pn,
+                appName = pm.getApplicationLabel(appInfo).toString(),
                 isGame = isGame,
             )
-        }.sortedByDescending { it.isGame }
+        }
+            .filterNotNull()
+            .sortedWith(compareByDescending<AppInfo> { it.isGame }.thenBy { it.appName.lowercase() })
     }
 
     suspend fun importConfig(jsonString: String): GameConfig? {

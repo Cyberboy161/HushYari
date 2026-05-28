@@ -312,8 +312,6 @@ fun HomeScreen(
     }
 
     if (showGameSelector) {
-        val density = LocalDensity.current
-        val sheetState = remember { androidx.compose.material3.SheetState(skipPartiallyExpanded = false, density = density) }
         GameSelector(
             games = uiState.installedGames,
             selectedPackage = uiState.selectedGame?.packageName,
@@ -322,7 +320,6 @@ fun HomeScreen(
                 showGameSelector = false
             },
             onDismiss = { showGameSelector = false },
-            sheetState = sheetState,
         )
     }
 }
